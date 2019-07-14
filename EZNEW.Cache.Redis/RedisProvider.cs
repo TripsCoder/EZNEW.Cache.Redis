@@ -1,4 +1,4 @@
-﻿using EZNEW.Cache.Request;
+﻿using EZNEW.Cache.Command;
 using EZNEW.Cache.Response;
 using EZNEW.Framework.ValueType;
 using EZNEW.Framework.Extension;
@@ -11,13 +11,14 @@ using System.Net;
 using System.Text;
 using System.Threading.Tasks;
 using System.Collections.Concurrent;
+using System.Threading;
 
 namespace EZNEW.Cache.Redis
 {
     /// <summary>
     /// implements ICacheEngine by Redis
     /// </summary>
-    public class RedisEngine : ICacheEngine
+    public class RedisProvider : ICacheProvider
     {
         static ConcurrentDictionary<string, ConnectionMultiplexer> connectionDict = new ConcurrentDictionary<string, ConnectionMultiplexer>();
 
@@ -32,12 +33,13 @@ namespace EZNEW.Cache.Redis
         /// Non-existing keys are considered as empty strings, so this command will make
         /// sure it holds a string large enough to be able to set value at offset.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string set range response</returns>
-        public async Task<StringSetRangeResponse> StringSetRangeAsync(StringSetRangeRequest request)
+        public async Task<StringSetRangeResponse> StringSetRangeAsync(CacheServer server, StringSetRangeCommand command)
         {
-            var db = GetDB(request.Server);
-            var newValue = await db.StringSetRangeAsync(request.Key, request.Offset, request.Value, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var newValue = await db.StringSetRangeAsync(command.Key, command.Offset, command.Value, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             long newLength = 0;
             long.TryParse(newValue, out newLength);
             return new StringSetRangeResponse()
@@ -57,12 +59,13 @@ namespace EZNEW.Cache.Redis
         /// does not exist, a new string value is created.The string is grown to make sure
         /// it can hold a bit at offset.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string set bit response</returns>
-        public async Task<StringSetBitResponse> StringSetBitAsync(StringSetBitRequest request)
+        public async Task<StringSetBitResponse> StringSetBitAsync(CacheServer server, StringSetBitCommand command)
         {
-            var db = GetDB(request.Server);
-            var oldBitValue = await db.StringSetBitAsync(request.Key, request.Offset, request.Bit, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var oldBitValue = await db.StringSetBitAsync(command.Key, command.Offset, command.Bit, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new StringSetBitResponse()
             {
                 Success = true,
@@ -78,12 +81,13 @@ namespace EZNEW.Cache.Redis
         /// Set key to hold the string value. If key already holds a value, it is overwritten,
         /// regardless of its type.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string set response</returns>
-        public async Task<StringSetResponse> StringSetAsync(StringSetRequest request)
+        public async Task<StringSetResponse> StringSetAsync(CacheServer server, StringSetCommand command)
         {
-            var db = GetDB(request.Server);
-            if (request.DataItems.IsNullOrEmpty())
+            var db = GetDB(server);
+            if (command.DataItems.IsNullOrEmpty())
             {
                 return new StringSetResponse()
                 {
@@ -91,21 +95,35 @@ namespace EZNEW.Cache.Redis
                     Message = "not have any data items"
                 };
             }
-            List<StringItemSetResult> resultList = new List<StringItemSetResult>(request.DataItems.Count);
-            foreach (var item in request.DataItems)
-            {
-                TimeSpan? expiry = null;
-                if (item.Seconds > 0)
-                {
-                    expiry = TimeSpan.FromSeconds(item.Seconds);
-                }
-                var result = await db.StringSetAsync(item.Key, item.Value.ToString(), expiry: expiry, when: GetWhen(item.SetCondition), flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
-                resultList.Add(new StringItemSetResult()
-                {
-                    Key = item.Key,
-                    SetSuccess = result
-                });
-            }
+            List<StringItemSetResult> resultList = new List<StringItemSetResult>(command.DataItems.Count);
+            command.DataItems.AsParallel().WithDegreeOfParallelism(Environment.ProcessorCount - 1).ForAll(async item =>
+              {
+                  TimeSpan? expiry = null;
+                  if (item.Seconds > 0)
+                  {
+                      expiry = TimeSpan.FromSeconds(item.Seconds);
+                  }
+                  var result = await db.StringSetAsync(item.Name, item.Value.ToString(), expiry: expiry, when: GetWhen(item.SetCondition), flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
+                  resultList.Add(new StringItemSetResult()
+                  {
+                      Key = item.Name,
+                      SetSuccess = result
+                  });
+              });
+            //foreach (var item in command.DataItems)
+            //{
+            //    TimeSpan? expiry = null;
+            //    if (item.Seconds > 0)
+            //    {
+            //        expiry = TimeSpan.FromSeconds(item.Seconds);
+            //    }
+            //    var result = await db.StringSetAsync(item.Name, item.Value.ToString(), expiry: expiry, when: GetWhen(item.SetCondition), flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
+            //    resultList.Add(new StringItemSetResult()
+            //    {
+            //        Key = item.Name,
+            //        SetSuccess = result
+            //    });
+            //}
             return new StringSetResponse()
             {
                 Success = true,
@@ -120,12 +138,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Returns the length of the string value stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string length response</returns>
-        public async Task<StringLengthResponse> StringLengthAsync(StringLengthRequest request)
+        public async Task<StringLengthResponse> StringLengthAsync(CacheServer server, StringLengthCommand command)
         {
-            var db = GetDB(request.Server);
-            var length = await db.StringLengthAsync(request.Key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var length = await db.StringLengthAsync(command.Key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new StringLengthResponse()
             {
                 Success = false,
@@ -144,11 +163,12 @@ namespace EZNEW.Cache.Redis
         /// point regardless of the actual internal precision of the computation.
         /// </summary>
         /// <typeparam name="T">data type</typeparam>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string increment response</returns>
-        public async Task<StringIncrementResponse<T>> StringIncrementAsync<T>(StringIncrementRequest<T> request)
+        public async Task<StringIncrementResponse<T>> StringIncrementAsync<T>(CacheServer server, StringIncrementCommand<T> command)
         {
-            var db = GetDB(request.Server);
+            var db = GetDB(server);
             var typeCode = Type.GetTypeCode(typeof(T));
             T newValue = default(T);
             bool operation = false;
@@ -165,8 +185,8 @@ namespace EZNEW.Cache.Redis
                 case TypeCode.UInt32:
                 case TypeCode.UInt64:
                     long incrementValue = 0;
-                    long.TryParse(request.Value.ToString(), out incrementValue);
-                    var newLongValue = await db.StringIncrementAsync(request.Key, incrementValue, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+                    long.TryParse(command.Value.ToString(), out incrementValue);
+                    var newLongValue = await db.StringIncrementAsync(command.Key, incrementValue, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
                     newValue = DataConverter.ConvertToSimpleType<T>(newLongValue);
                     operation = true;
                     break;
@@ -174,8 +194,8 @@ namespace EZNEW.Cache.Redis
                 case TypeCode.Double:
                 case TypeCode.Single:
                     double doubleIncrementValue = 0;
-                    double.TryParse(request.Value.ToString(), out doubleIncrementValue);
-                    var newDoubleValue = await db.StringIncrementAsync(request.Key, doubleIncrementValue, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+                    double.TryParse(command.Value.ToString(), out doubleIncrementValue);
+                    var newDoubleValue = await db.StringIncrementAsync(command.Key, doubleIncrementValue, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
                     newValue = DataConverter.ConvertToSimpleType<T>(newDoubleValue);
                     operation = true;
                     break;
@@ -196,12 +216,13 @@ namespace EZNEW.Cache.Redis
         /// An error is returned if the value stored at key is not a string, because GET
         /// only handles string values.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string get with expiry response</returns>
-        public async Task<StringGetWithExpiryResponse> StringGetWithExpiryAsync(StringGetWithExpiryRequest request)
+        public async Task<StringGetWithExpiryResponse> StringGetWithExpiryAsync(CacheServer server, StringGetWithExpiryCommand command)
         {
-            var db = GetDB(request.Server);
-            var valueWithExpiry = await db.StringGetWithExpiryAsync(request.Key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var valueWithExpiry = await db.StringGetWithExpiryAsync(command.Key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new StringGetWithExpiryResponse()
             {
                 Success = true,
@@ -217,12 +238,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Atomically sets key to value and returns the old value stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string get set response</returns>
-        public async Task<StringGetSetResponse> StringGetSetAsync(StringGetSetRequest request)
+        public async Task<StringGetSetResponse> StringGetSetAsync(CacheServer server, StringGetSetCommand command)
         {
-            var db = GetDB(request.Server);
-            var oldValue = await db.StringGetSetAsync(request.Key, request.NewValue, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var oldValue = await db.StringGetSetAsync(command.Key, command.NewValue, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new StringGetSetResponse()
             {
                 Success = true,
@@ -240,12 +262,13 @@ namespace EZNEW.Cache.Redis
         /// provide an offset starting from the end of the string. So -1 means the last character,
         /// -2 the penultimate and so forth.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string get range response</returns>
-        public async Task<StringGetRangeResponse> StringGetRangeAsync(StringGetRangeRequest request)
+        public async Task<StringGetRangeResponse> StringGetRangeAsync(CacheServer server, StringGetRangeCommand command)
         {
-            var db = GetDB(request.Server);
-            var rangeValue = await db.StringGetRangeAsync(request.Key, request.Start, request.End, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var rangeValue = await db.StringGetRangeAsync(command.Key, command.Start, command.End, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new StringGetRangeResponse()
             {
                 Success = true,
@@ -262,12 +285,13 @@ namespace EZNEW.Cache.Redis
         /// is beyond the string length, the string is assumed to be a contiguous space with
         /// 0 bits
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string get bit response</returns>
-        public async Task<StringGetBitResponse> StringGetBitAsync(StringGetBitRequest request)
+        public async Task<StringGetBitResponse> StringGetBitAsync(CacheServer server, StringGetBitCommand command)
         {
-            var db = GetDB(request.Server);
-            var bit = await db.StringGetBitAsync(request.Key, request.Offset, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var bit = await db.StringGetBitAsync(command.Key, command.Offset, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new StringGetBitResponse()
             {
                 Success = true,
@@ -283,11 +307,12 @@ namespace EZNEW.Cache.Redis
         /// Returns the values of all specified keys. For every key that does not hold a
         /// string value or does not exist, the special value nil is returned.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string get response</returns>
-        public async Task<StringGetResponse> StringGetAsync(StringGetRequest request)
+        public async Task<StringGetResponse> StringGetAsync(CacheServer server, StringGetCommand command)
         {
-            if (request.Keys.IsNullOrEmpty())
+            if (command.Keys.IsNullOrEmpty())
             {
                 return new StringGetResponse()
                 {
@@ -295,14 +320,14 @@ namespace EZNEW.Cache.Redis
                     Message = "keys is null or empty"
                 };
             }
-            var db = GetDB(request.Server);
-            List<KeyItem> values = new List<KeyItem>(request.Keys.Count);
-            foreach (var key in request.Keys)
+            var db = GetDB(server);
+            List<CacheDataItem> values = new List<CacheDataItem>(command.Keys.Count);
+            foreach (var key in command.Keys)
             {
-                var value = await db.StringGetAsync(key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
-                values.Add(new KeyItem()
+                var value = await db.StringGetAsync(key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
+                values.Add(new CacheDataItem()
                 {
-                    Key = key,
+                    Name = key,
                     Value = value
                 });
             }
@@ -324,11 +349,12 @@ namespace EZNEW.Cache.Redis
         /// as integer. This operation is limited to 64 bit signed integers.
         /// </summary>
         /// <typeparam name="T">data type</typeparam>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string decrement response</returns>
-        public async Task<StringDecrementResponse<T>> StringDecrementAsync<T>(StringDecrementRequest<T> request)
+        public async Task<StringDecrementResponse<T>> StringDecrementAsync<T>(CacheServer server, StringDecrementCommand<T> command)
         {
-            var db = GetDB(request.Server);
+            var db = GetDB(server);
             var typeCode = Type.GetTypeCode(typeof(T));
             T newValue = default(T);
             bool operation = false;
@@ -345,8 +371,8 @@ namespace EZNEW.Cache.Redis
                 case TypeCode.UInt32:
                 case TypeCode.UInt64:
                     long incrementValue = 0;
-                    long.TryParse(request.Value.ToString(), out incrementValue);
-                    var newLongValue = await db.StringDecrementAsync(request.Key, incrementValue, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+                    long.TryParse(command.Value.ToString(), out incrementValue);
+                    var newLongValue = await db.StringDecrementAsync(command.Key, incrementValue, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
                     newValue = DataConverter.ConvertToSimpleType<T>(newLongValue);
                     operation = true;
                     break;
@@ -354,8 +380,8 @@ namespace EZNEW.Cache.Redis
                 case TypeCode.Double:
                 case TypeCode.Single:
                     double doubleIncrementValue = 0;
-                    double.TryParse(request.Value.ToString(), out doubleIncrementValue);
-                    var newDoubleValue = await db.StringDecrementAsync(request.Key, doubleIncrementValue, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+                    double.TryParse(command.Value.ToString(), out doubleIncrementValue);
+                    var newDoubleValue = await db.StringDecrementAsync(command.Key, doubleIncrementValue, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
                     newValue = DataConverter.ConvertToSimpleType<T>(newDoubleValue);
                     operation = true;
                     break;
@@ -380,12 +406,13 @@ namespace EZNEW.Cache.Redis
         /// bytes starting from the end of the string, where -1 is the last byte, -2 is the
         /// penultimate, and so forth.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string bit position response</returns>
-        public async Task<StringBitPositionResponse> StringBitPositionAsync(StringBitPositionRequest request)
+        public async Task<StringBitPositionResponse> StringBitPositionAsync(CacheServer server, StringBitPositionCommand command)
         {
-            var db = GetDB(request.Server);
-            var position = await db.StringBitPositionAsync(request.Key, request.Bit, request.Start, request.End, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var position = await db.StringBitPositionAsync(command.Key, command.Bit, command.Start, command.End, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new StringBitPositionResponse()
             {
                 Success = true,
@@ -405,12 +432,13 @@ namespace EZNEW.Cache.Redis
         ///  be omitted in this case and only the first key will be considered. The result
         /// of the operation is always stored at destkey.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string bit operation response</returns>
-        public async Task<StringBitOperationResponse> StringBitOperationAsync(StringBitOperationRequest request)
+        public async Task<StringBitOperationResponse> StringBitOperationAsync(CacheServer server, StringBitOperationCommand command)
         {
-            var db = GetDB(request.Server);
-            var destionationValueLength = await db.StringBitOperationAsync(GetBitwise(request.Bitwise), request.DestinationKey, request.Keys.Select(c => { RedisKey key = c; return key; }).ToArray(), flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var destionationValueLength = await db.StringBitOperationAsync(GetBitwise(command.Bitwise), command.DestinationKey, command.Keys.Select(c => { RedisKey key = c; return key; }).ToArray(), flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new StringBitOperationResponse()
             {
                 Success = true,
@@ -430,12 +458,13 @@ namespace EZNEW.Cache.Redis
         /// in order to index bytes starting from the end of the string, where -1 is the
         /// last byte, -2 is the penultimate, and so forth.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string bit count response</returns>
-        public async Task<StringBitCountResponse> StringBitCountAsync(StringBitCountRequest request)
+        public async Task<StringBitCountResponse> StringBitCountAsync(CacheServer server, StringBitCountCommand command)
         {
-            var db = GetDB(request.Server);
-            var count = await db.StringBitCountAsync(request.Key, request.Start, request.End, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var count = await db.StringBitCountAsync(command.Key, command.Start, command.End, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new StringBitCountResponse()
             {
                 Success = true,
@@ -452,12 +481,13 @@ namespace EZNEW.Cache.Redis
         /// end of the string. If key does not exist it is created and set as an empty string,
         /// so APPEND will be similar to SET in this special case.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>string append response</returns>
-        public async Task<StringAppendResponse> StringAppendAsync(StringAppendRequest request)
+        public async Task<StringAppendResponse> StringAppendAsync(CacheServer server, StringAppendCommand command)
         {
-            var db = GetDB(request.Server);
-            var length = await db.StringAppendAsync(request.Key, request.Value).ConfigureAwait(false);
+            var db = GetDB(server);
+            var length = await db.StringAppendAsync(command.Key, command.Value).ConfigureAwait(false);
             return new StringAppendResponse()
             {
                 Success = false,
@@ -482,12 +512,13 @@ namespace EZNEW.Cache.Redis
         /// offsets from the end of the list, where -1 is the last element of the list, -2
         /// the penultimate element and so on.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>list trim response</returns>
-        public async Task<ListTrimResponse> ListTrimAsync(ListTrimRequest request)
+        public async Task<ListTrimResponse> ListTrimAsync(CacheServer server, ListTrimCommand command)
         {
-            var db = GetDB(request.Server);
-            await db.ListTrimAsync(request.Key, request.Start, request.Stop, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            await db.ListTrimAsync(command.Key, command.Start, command.Stop, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new ListTrimResponse()
             {
                 Success = true
@@ -502,12 +533,13 @@ namespace EZNEW.Cache.Redis
         /// Sets the list element at index to value. For more information on the index argument,
         ///  see ListGetByIndex. An error is returned for out of range indexes.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>list set by index response</returns>
-        public async Task<ListSetByIndexResponse> ListSetByIndexAsync(ListSetByIndexRequest request)
+        public async Task<ListSetByIndexResponse> ListSetByIndexAsync(CacheServer server, ListSetByIndexCommand command)
         {
-            var db = GetDB(request.Server);
-            await db.ListSetByIndexAsync(request.Key, request.Index, request.Value, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            await db.ListSetByIndexAsync(command.Key, command.Index, command.Value, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new ListSetByIndexResponse()
             {
                 Success = true
@@ -526,12 +558,13 @@ namespace EZNEW.Cache.Redis
         /// b c will result into a list containing a as first element, b as second element
         /// and c as third element.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>list right push</returns>
-        public async Task<ListRightPushResponse> ListRightPushAsync(ListRightPushRequest request)
+        public async Task<ListRightPushResponse> ListRightPushAsync(CacheServer server, ListRightPushCommand command)
         {
-            var db = GetDB(request.Server);
-            var newLength = await db.ListRightPushAsync(request.Key, request.Values.Select(c => { RedisValue value = c; return value; }).ToArray(), flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var newLength = await db.ListRightPushAsync(command.Key, command.Values.Select(c => { RedisValue value = c; return value; }).ToArray(), flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new ListRightPushResponse()
             {
                 Success = true,
@@ -548,12 +581,13 @@ namespace EZNEW.Cache.Redis
         /// source, and pushes the element at the first element (head) of the list stored
         /// at destination.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>list right pop left response</returns>
-        public async Task<ListRightPopLeftPushResponse> ListRightPopLeftPushAsync(ListRightPopLeftPushRequest request)
+        public async Task<ListRightPopLeftPushResponse> ListRightPopLeftPushAsync(CacheServer server, ListRightPopLeftPushCommand command)
         {
-            var db = GetDB(request.Server);
-            var value = await db.ListRightPopLeftPushAsync(request.SourceKey, request.DestinationKey, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var value = await db.ListRightPopLeftPushAsync(command.SourceKey, command.DestinationKey, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new ListRightPopLeftPushResponse()
             {
                 Success = true,
@@ -568,12 +602,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Removes and returns the last element of the list stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>list right pop response</returns>
-        public async Task<ListRightPopResponse> ListRightPopAsync(ListRightPopRequest request)
+        public async Task<ListRightPopResponse> ListRightPopAsync(CacheServer server, ListRightPopCommand command)
         {
-            var db = GetDB(request.Server);
-            var value = await db.ListRightPopAsync(request.Key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var value = await db.ListRightPopAsync(command.Key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new ListRightPopResponse()
             {
                 Success = true,
@@ -592,12 +627,13 @@ namespace EZNEW.Cache.Redis
         /// Remove elements equal to value moving from tail to head. count = 0: Remove all
         /// elements equal to value.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>list remove response</returns>
-        public async Task<ListRemoveResponse> ListRemoveAsync(ListRemoveRequest request)
+        public async Task<ListRemoveResponse> ListRemoveAsync(CacheServer server, ListRemoveCommand command)
         {
-            var db = GetDB(request.Server);
-            var removeCount = await db.ListRemoveAsync(request.Key, request.Value, request.Count, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var removeCount = await db.ListRemoveAsync(command.Key, command.Value, command.Count, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new ListRemoveResponse()
             {
                 Success = true,
@@ -618,12 +654,13 @@ namespace EZNEW.Cache.Redis
         /// if you have a list of numbers from 0 to 100, LRANGE list 0 10 will return 11
         /// elements, that is, the rightmost item is included.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>list range response</returns>
-        public async Task<ListRangeResponse> ListRangeAsync(ListRangeRequest request)
+        public async Task<ListRangeResponse> ListRangeAsync(CacheServer server, ListRangeCommand command)
         {
-            var db = GetDB(request.Server);
-            var values = await db.ListRangeAsync(request.Key, request.Start, request.Stop, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var values = await db.ListRangeAsync(command.Key, command.Start, command.Stop, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new ListRangeResponse()
             {
                 Success = true,
@@ -639,12 +676,13 @@ namespace EZNEW.Cache.Redis
         /// Returns the length of the list stored at key. If key does not exist, it is interpreted
         ///  as an empty list and 0 is returned.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>list length response</returns>
-        public async Task<ListLengthResponse> ListLengthAsync(ListLengthRequest request)
+        public async Task<ListLengthResponse> ListLengthAsync(CacheServer server, ListLengthCommand command)
         {
-            var db = GetDB(request.Server);
-            var length = await db.ListLengthAsync(request.Key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var length = await db.ListLengthAsync(command.Key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new ListLengthResponse()
             {
                 Success = true,
@@ -660,12 +698,13 @@ namespace EZNEW.Cache.Redis
         /// Insert the specified value at the head of the list stored at key. If key does
         ///  not exist, it is created as empty list before performing the push operations.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>list left push response</returns>
-        public async Task<ListLeftPushResponse> ListLeftPushAsync(ListLeftPushRequest request)
+        public async Task<ListLeftPushResponse> ListLeftPushAsync(CacheServer server, ListLeftPushCommand command)
         {
-            var db = GetDB(request.Server);
-            var length = await db.ListLeftPushAsync(request.Key, request.Values.Select(c => { RedisValue rvalue = c; return rvalue; }).ToArray(), flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var length = await db.ListLeftPushAsync(command.Key, command.Values.Select(c => { RedisValue rvalue = c; return rvalue; }).ToArray(), flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new ListLeftPushResponse()
             {
                 Success = true,
@@ -680,12 +719,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Removes and returns the first element of the list stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>list left pop response</returns>
-        public async Task<ListLeftPopResponse> ListLeftPopAsync(ListLeftPopRequest request)
+        public async Task<ListLeftPopResponse> ListLeftPopAsync(CacheServer server, ListLeftPopCommand command)
         {
-            var db = GetDB(request.Server);
-            var value = await db.ListLeftPopAsync(request.Key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var value = await db.ListLeftPopAsync(command.Key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new ListLeftPopResponse()
             {
                 Success = true,
@@ -702,12 +742,13 @@ namespace EZNEW.Cache.Redis
         /// value pivot. When key does not exist, it is considered an empty list and no operation
         /// is performed.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>list insert begore response</returns>
-        public async Task<ListInsertBeforeResponse> ListInsertBeforeAsync(ListInsertBeforeRequest request)
+        public async Task<ListInsertBeforeResponse> ListInsertBeforeAsync(CacheServer server, ListInsertBeforeCommand command)
         {
-            var db = GetDB(request.Server);
-            var newLength = await db.ListInsertBeforeAsync(request.Key, request.PivotValue, request.InsertValue, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var newLength = await db.ListInsertBeforeAsync(command.Key, command.PivotValue, command.InsertValue, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new ListInsertBeforeResponse()
             {
                 NewListLength = newLength,
@@ -724,12 +765,13 @@ namespace EZNEW.Cache.Redis
         /// value pivot. When key does not exist, it is considered an empty list and no operation
         /// is performed.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>list insert after response</returns>
-        public async Task<ListInsertAfterResponse> ListInsertAfterAsync(ListInsertAfterRequest request)
+        public async Task<ListInsertAfterResponse> ListInsertAfterAsync(CacheServer server, ListInsertAfterCommand command)
         {
-            var db = GetDB(request.Server);
-            var newLength = await db.ListInsertAfterAsync(request.Key, request.PivotValue, request.InsertValue, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var newLength = await db.ListInsertAfterAsync(command.Key, command.PivotValue, command.InsertValue, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new ListInsertAfterResponse()
             {
                 Success = true,
@@ -748,12 +790,13 @@ namespace EZNEW.Cache.Redis
         /// can be used to designate elements starting at the tail of the list. Here, -1
         /// means the last element, -2 means the penultimate and so forth.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>list get by index response</returns>
-        public async Task<ListGetByIndexResponse> ListGetByIndexAsync(ListGetByIndexRequest request)
+        public async Task<ListGetByIndexResponse> ListGetByIndexAsync(CacheServer server, ListGetByIndexCommand command)
         {
-            var db = GetDB(request.Server);
-            var value = await db.ListGetByIndexAsync(request.Key, request.Index, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var value = await db.ListGetByIndexAsync(command.Key, command.Index, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new ListGetByIndexResponse()
             {
                 Success = true,
@@ -772,12 +815,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Returns all values in the hash stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>hash values response</returns>
-        public async Task<HashValuesResponse> HashValuesAsync(HashValuesRequest request)
+        public async Task<HashValuesResponse> HashValuesAsync(CacheServer server, HashValuesCommand command)
         {
-            var db = GetDB(request.Server);
-            var hashValues = await db.HashValuesAsync(request.Key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var hashValues = await db.HashValuesAsync(command.Key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new HashValuesResponse()
             {
                 Success = true,
@@ -793,12 +837,13 @@ namespace EZNEW.Cache.Redis
         /// Sets field in the hash stored at key to value. If key does not exist, a new key
         ///  holding a hash is created. If field already exists in the hash, it is overwritten.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>hash set response</returns>
-        public async Task<HashSetResponse> HashSetAsync(HashSetRequest request)
+        public async Task<HashSetResponse> HashSetAsync(CacheServer server, HashSetCommand command)
         {
-            var db = GetDB(request.Server);
-            await db.HashSetAsync(request.Key, request.HashValues.Select(c => new HashEntry(c.Key, c.Value)).ToArray(), flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            await db.HashSetAsync(command.Key, command.HashValues.Select(c => new HashEntry(c.Key, c.Value)).ToArray(), flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new HashSetResponse()
             {
                 Success = true
@@ -812,12 +857,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Returns the number of fields contained in the hash stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>hash length response</returns>
-        public async Task<HashLengthResponse> HashLengthAsync(HashLengthRequest request)
+        public async Task<HashLengthResponse> HashLengthAsync(CacheServer server, HashLengthCommand command)
         {
-            var db = GetDB(request.Server);
-            var length = await db.HashLengthAsync(request.Key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var length = await db.HashLengthAsync(command.Key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new HashLengthResponse()
             {
                 Success = true,
@@ -832,12 +878,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Returns all field names in the hash stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>hash keys response</returns>
-        public async Task<HashKeysResponse> HashKeysAsync(HashKeysRequest request)
+        public async Task<HashKeysResponse> HashKeysAsync(CacheServer server, HashKeysCommand command)
         {
-            var db = GetDB(request.Server);
-            var keys = await db.HashKeysAsync(request.Key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var keys = await db.HashKeysAsync(command.Key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new HashKeysResponse()
             {
                 Success = true,
@@ -857,11 +904,12 @@ namespace EZNEW.Cache.Redis
         /// to 0 before the operation is performed.
         /// </summary>
         /// <typeparam name="T">data type</typeparam>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>hash increment response</returns>
-        public async Task<HashIncrementResponse<T>> HashIncrementAsync<T>(HashIncrementRequest<T> request)
+        public async Task<HashIncrementResponse<T>> HashIncrementAsync<T>(CacheServer server, HashIncrementCommand<T> command)
         {
-            var db = GetDB(request.Server);
+            var db = GetDB(server);
             var typeCode = Type.GetTypeCode(typeof(T));
             T newValue = default(T);
             bool operation = false;
@@ -878,8 +926,8 @@ namespace EZNEW.Cache.Redis
                 case TypeCode.UInt32:
                 case TypeCode.UInt64:
                     long incrementValue = 0;
-                    long.TryParse(request.IncrementValue.ToString(), out incrementValue);
-                    var newLongValue = await db.HashIncrementAsync(request.Key, request.HashField, incrementValue, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+                    long.TryParse(command.IncrementValue.ToString(), out incrementValue);
+                    var newLongValue = await db.HashIncrementAsync(command.Key, command.HashField, incrementValue, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
                     newValue = DataConverter.ConvertToSimpleType<T>(newLongValue);
                     operation = true;
                     break;
@@ -887,8 +935,8 @@ namespace EZNEW.Cache.Redis
                 case TypeCode.Double:
                 case TypeCode.Single:
                     double doubleIncrementValue = 0;
-                    double.TryParse(request.IncrementValue.ToString(), out doubleIncrementValue);
-                    var newDoubleValue = await db.HashIncrementAsync(request.Key, request.HashField, doubleIncrementValue, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+                    double.TryParse(command.IncrementValue.ToString(), out doubleIncrementValue);
+                    var newDoubleValue = await db.HashIncrementAsync(command.Key, command.HashField, doubleIncrementValue, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
                     newValue = DataConverter.ConvertToSimpleType<T>(newDoubleValue);
                     operation = true;
                     break;
@@ -897,8 +945,8 @@ namespace EZNEW.Cache.Redis
             {
                 Success = operation,
                 NewValue = newValue,
-                Key = request.Key,
-                HashField = request.HashField
+                Key = command.Key,
+                HashField = command.HashField
             };
         }
 
@@ -909,12 +957,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Returns the value associated with field in the hash stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>hash get response</returns>
-        public async Task<HashGetResponse> HashGetAsync(HashGetRequest request)
+        public async Task<HashGetResponse> HashGetAsync(CacheServer server, HashGetCommand command)
         {
-            var db = GetDB(request.Server);
-            var value = await db.HashGetAsync(request.Key, request.HashField, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var value = await db.HashGetAsync(command.Key, command.HashField, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new HashGetResponse()
             {
                 Success = true,
@@ -929,12 +978,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Returns all fields and values of the hash stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>hash get all response</returns>
-        public async Task<HashGetAllResponse> HashGetAllAsync(HashGetAllRequest request)
+        public async Task<HashGetAllResponse> HashGetAllAsync(CacheServer server, HashGetAllCommand command)
         {
-            var db = GetDB(request.Server);
-            var hashValues = await db.HashGetAllAsync(request.Key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var hashValues = await db.HashGetAllAsync(command.Key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new HashGetAllResponse()
             {
                 Success = true,
@@ -949,12 +999,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Returns if field is an existing field in the hash stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>hash exists response</returns>
-        public async Task<HashExistsResponse> HashExistsAsync(HashExistsRequest request)
+        public async Task<HashExistsResponse> HashExistsAsync(CacheServer server, HashExistsCommand command)
         {
-            var db = GetDB(request.Server);
-            var exist = await db.HashExistsAsync(request.Key, request.HashField, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var exist = await db.HashExistsAsync(command.Key, command.HashField, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new HashExistsResponse()
             {
                 Success = true,
@@ -970,12 +1021,13 @@ namespace EZNEW.Cache.Redis
         /// Removes the specified fields from the hash stored at key. Non-existing fields
         /// are ignored. Non-existing keys are treated as empty hashes and this command returns 0
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>hash delete response</returns>
-        public async Task<HashDeleteResponse> HashDeleteAsync(HashDeleteRequest request)
+        public async Task<HashDeleteResponse> HashDeleteAsync(CacheServer server, HashDeleteCommand command)
         {
-            var db = GetDB(request.Server);
-            var result = await db.HashDeleteAsync(request.Key, request.HashField, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var result = await db.HashDeleteAsync(command.Key, command.HashField, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new HashDeleteResponse()
             {
                 Success = true,
@@ -993,11 +1045,12 @@ namespace EZNEW.Cache.Redis
         ///  set to 0 before performing the operation.
         /// </summary>
         /// <typeparam name="T">data type</typeparam>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>hash decrement response</returns>
-        public async Task<HashDecrementResponse<T>> HashDecrementAsync<T>(HashDecrementRequest<T> request)
+        public async Task<HashDecrementResponse<T>> HashDecrementAsync<T>(CacheServer server, HashDecrementCommand<T> command)
         {
-            var db = GetDB(request.Server);
+            var db = GetDB(server);
             var typeCode = Type.GetTypeCode(typeof(T));
             T newValue = default(T);
             bool operation = false;
@@ -1014,8 +1067,8 @@ namespace EZNEW.Cache.Redis
                 case TypeCode.UInt32:
                 case TypeCode.UInt64:
                     long incrementValue = 0;
-                    long.TryParse(request.DecrementValue.ToString(), out incrementValue);
-                    var newLongValue = await db.HashDecrementAsync(request.Key, request.HashField, incrementValue, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+                    long.TryParse(command.DecrementValue.ToString(), out incrementValue);
+                    var newLongValue = await db.HashDecrementAsync(command.Key, command.HashField, incrementValue, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
                     newValue = DataConverter.ConvertToSimpleType<T>(newLongValue);
                     operation = true;
                     break;
@@ -1023,8 +1076,8 @@ namespace EZNEW.Cache.Redis
                 case TypeCode.Double:
                 case TypeCode.Single:
                     double doubleIncrementValue = 0;
-                    double.TryParse(request.DecrementValue.ToString(), out doubleIncrementValue);
-                    var newDoubleValue = await db.HashDecrementAsync(request.Key, request.HashField, doubleIncrementValue, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+                    double.TryParse(command.DecrementValue.ToString(), out doubleIncrementValue);
+                    var newDoubleValue = await db.HashDecrementAsync(command.Key, command.HashField, doubleIncrementValue, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
                     newValue = DataConverter.ConvertToSimpleType<T>(newDoubleValue);
                     operation = true;
                     break;
@@ -1033,8 +1086,8 @@ namespace EZNEW.Cache.Redis
             {
                 Success = operation,
                 NewValue = newValue,
-                Key = request.Key,
-                HashField = request.HashField
+                Key = command.Key,
+                HashField = command.HashField
             };
         }
 
@@ -1045,14 +1098,15 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// The HSCAN command is used to incrementally iterate over a hash
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>hash scan response</returns>
-        public async Task<HashScanResponse> HashScanAsync(HashScanRequest request)
+        public async Task<HashScanResponse> HashScanAsync(CacheServer server, HashScanCommand command)
         {
-            var db = GetDB(request.Server);
+            var db = GetDB(server);
             var values = await Task<List<HashEntry>>.Run(() =>
             {
-                return db.HashScan(request.Key, request.Pattern, request.PageSize, GetCommandFlags(request.CommandFlags)).ToList();
+                return db.HashScan(command.Key, command.Pattern, command.PageSize, GetCommandFlags(command.CommandFlags)).ToList();
             }).ConfigureAwait(false);
             return new HashScanResponse()
             {
@@ -1073,12 +1127,13 @@ namespace EZNEW.Cache.Redis
         /// Remove the specified member from the set stored at key. Specified members that
         /// are not a member of this set are ignored.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>set remove response</returns>
-        public async Task<SetRemoveResponse> SetRemoveAsync(SetRemoveRequest request)
+        public async Task<SetRemoveResponse> SetRemoveAsync(CacheServer server, SetRemoveCommand command)
         {
-            var db = GetDB(request.Server);
-            var result = await db.SetRemoveAsync(request.Key, request.RemoveValues.Select(c => { RedisValue value = c; return value; }).ToArray(), flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var result = await db.SetRemoveAsync(command.Key, command.RemoveValues.Select(c => { RedisValue value = c; return value; }).ToArray(), flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SetRemoveResponse()
             {
                 Success = true,
@@ -1096,12 +1151,13 @@ namespace EZNEW.Cache.Redis
         /// same element multiple times. In this case the numer of returned elements is the
         /// absolute value of the specified count.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>set random members response</returns>
-        public async Task<SetRandomMembersResponse> SetRandomMembersAsync(SetRandomMembersRequest request)
+        public async Task<SetRandomMembersResponse> SetRandomMembersAsync(CacheServer server, SetRandomMembersCommand command)
         {
-            var db = GetDB(request.Server);
-            var members = await db.SetRandomMembersAsync(request.Key, request.Count, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var members = await db.SetRandomMembersAsync(command.Key, command.Count, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SetRandomMembersResponse()
             {
                 Success = true,
@@ -1116,12 +1172,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Return a random element from the set value stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>set random member</returns>
-        public async Task<SetRandomMemberResponse> SetRandomMemberAsync(SetRandomMemberRequest request)
+        public async Task<SetRandomMemberResponse> SetRandomMemberAsync(CacheServer server, SetRandomMemberCommand command)
         {
-            var db = GetDB(request.Server);
-            var member = await db.SetRandomMemberAsync(request.Key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var member = await db.SetRandomMemberAsync(command.Key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SetRandomMemberResponse()
             {
                 Success = true,
@@ -1136,12 +1193,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Removes and returns a random element from the set value stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>set pop response</returns>
-        public async Task<SetPopResponse> SetPopAsync(SetPopRequest request)
+        public async Task<SetPopResponse> SetPopAsync(CacheServer server, SetPopCommand command)
         {
-            var db = GetDB(request.Server);
-            var value = await db.SetPopAsync(request.Key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var value = await db.SetPopAsync(command.Key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SetPopResponse()
             {
                 Success = true,
@@ -1159,12 +1217,13 @@ namespace EZNEW.Cache.Redis
         /// or destination for other clients. When the specified element already exists in
         /// the destination set, it is only removed from the source set.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>set move response</returns>
-        public async Task<SetMoveResponse> SetMoveAsync(SetMoveRequest request)
+        public async Task<SetMoveResponse> SetMoveAsync(CacheServer server, SetMoveCommand command)
         {
-            var db = GetDB(request.Server);
-            var moveResult = await db.SetMoveAsync(request.SourceKey, request.DestinationKey, request.MoveValue, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var moveResult = await db.SetMoveAsync(command.SourceKey, command.DestinationKey, command.MoveValue, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SetMoveResponse()
             {
                 Success = true,
@@ -1179,12 +1238,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Returns all the members of the set value stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>set members response</returns>
-        public async Task<SetMembersResponse> SetMembersAsync(SetMembersRequest request)
+        public async Task<SetMembersResponse> SetMembersAsync(CacheServer server, SetMembersCommand command)
         {
-            var db = GetDB(request.Server);
-            var members = await db.SetMembersAsync(request.Key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var members = await db.SetMembersAsync(command.Key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SetMembersResponse()
             {
                 Success = true,
@@ -1199,12 +1259,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Returns the set cardinality (number of elements) of the set stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>set length response</returns>
-        public async Task<SetLengthResponse> SetLengthAsync(SetLengthRequest request)
+        public async Task<SetLengthResponse> SetLengthAsync(CacheServer server, SetLengthCommand command)
         {
-            var db = GetDB(request.Server);
-            var length = await db.SetLengthAsync(request.Key, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var length = await db.SetLengthAsync(command.Key, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SetLengthResponse()
             {
                 Success = true,
@@ -1219,12 +1280,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Returns if member is a member of the set stored at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>set contains response</returns>
-        public async Task<SetContainsResponse> SetContainsAsync(SetContainsRequest request)
+        public async Task<SetContainsResponse> SetContainsAsync(CacheServer server, SetContainsCommand command)
         {
-            var db = GetDB(request.Server);
-            var containsValue = await db.SetContainsAsync(request.Key, request.Value, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var containsValue = await db.SetContainsAsync(command.Key, command.Value, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SetContainsResponse()
             {
                 Success = true,
@@ -1240,12 +1302,13 @@ namespace EZNEW.Cache.Redis
         /// Returns the members of the set resulting from the specified operation against
         /// the given sets.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>set combine response</returns>
-        public async Task<SetCombineResponse> SetCombineAsync(SetCombineRequest request)
+        public async Task<SetCombineResponse> SetCombineAsync(CacheServer server, SetCombineCommand command)
         {
-            var db = GetDB(request.Server);
-            var values = await db.SetCombineAsync(GetSetOperation(request.SetOperation), request.Keys.Select(c => { RedisKey key = c; return key; }).ToArray(), flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var values = await db.SetCombineAsync(GetSetOperation(command.SetOperation), command.Keys.Select(c => { RedisKey key = c; return key; }).ToArray(), flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SetCombineResponse()
             {
                 Success = true,
@@ -1261,12 +1324,13 @@ namespace EZNEW.Cache.Redis
         /// This command is equal to SetCombine, but instead of returning the resulting set,
         ///  it is stored in destination. If destination already exists, it is overwritten.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>set combine and store response</returns>
-        public async Task<SetCombineAndStoreResponse> SetCombineAndStoreAsync(SetCombineAndStoreRequest request)
+        public async Task<SetCombineAndStoreResponse> SetCombineAndStoreAsync(CacheServer server, SetCombineAndStoreCommand command)
         {
-            var db = GetDB(request.Server);
-            var newValueCount = await db.SetCombineAndStoreAsync(GetSetOperation(request.SetOperation), request.DestinationKey, request.SourceKeys.Select(c => { RedisKey key = c; return key; }).ToArray(), flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var newValueCount = await db.SetCombineAndStoreAsync(GetSetOperation(command.SetOperation), command.DestinationKey, command.SourceKeys.Select(c => { RedisKey key = c; return key; }).ToArray(), flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SetCombineAndStoreResponse()
             {
                 Success = true,
@@ -1283,12 +1347,13 @@ namespace EZNEW.Cache.Redis
         /// already a member of this set are ignored. If key does not exist, a new set is
         /// created before adding the specified members.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>set add response</returns>
-        public async Task<SetAddResponse> SetAddAsync(SetAddRequest request)
+        public async Task<SetAddResponse> SetAddAsync(CacheServer server, SetAddCommand command)
         {
-            var db = GetDB(request.Server);
-            var addResult = await db.SetAddAsync(request.Key, request.Value, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var addResult = await db.SetAddAsync(command.Key, command.Value, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SetAddResponse()
             {
                 Success = true,
@@ -1308,12 +1373,13 @@ namespace EZNEW.Cache.Redis
         /// Returns the score of member in the sorted set at key; If member does not exist
         /// in the sorted set, or key does not exist, nil is returned.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set score response</returns>
-        public async Task<SortedSetScoreResponse> SortedSetScoreAsync(SortedSetScoreRequest request)
+        public async Task<SortedSetScoreResponse> SortedSetScoreAsync(CacheServer server, SortedSetScoreCommand command)
         {
-            var db = GetDB(request.Server);
-            var score = await db.SortedSetScoreAsync(request.Key, request.Member, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var score = await db.SortedSetScoreAsync(command.Key, command.Member, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetScoreResponse()
             {
                 Success = true,
@@ -1330,12 +1396,13 @@ namespace EZNEW.Cache.Redis
         /// to force lexicographical ordering, this command removes all elements in the sorted
         /// set stored at key between the lexicographical range specified by min and max.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set remove range by value response</returns>
-        public async Task<SortedSetRemoveRangeByValueResponse> SortedSetRemoveRangeByValueAsync(SortedSetRemoveRangeByValueRequest request)
+        public async Task<SortedSetRemoveRangeByValueResponse> SortedSetRemoveRangeByValueAsync(CacheServer server, SortedSetRemoveRangeByValueCommand command)
         {
-            var db = GetDB(request.Server);
-            var removeCount = await db.SortedSetRemoveRangeByValueAsync(request.Key, request.MinValue, request.MaxValue, exclude: GetExclude(request.Exclude), flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var removeCount = await db.SortedSetRemoveRangeByValueAsync(command.Key, command.MinValue, command.MaxValue, exclude: GetExclude(command.Exclude), flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetRemoveRangeByValueResponse()
             {
                 RemoveCount = removeCount,
@@ -1351,12 +1418,13 @@ namespace EZNEW.Cache.Redis
         /// Removes all elements in the sorted set stored at key with a score between min
         ///  and max (inclusive by default).
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set remove range by score response</returns>
-        public async Task<SortedSetRemoveRangeByScoreResponse> SortedSetRemoveRangeByScoreAsync(SortedSetRemoveRangeByScoreRequest request)
+        public async Task<SortedSetRemoveRangeByScoreResponse> SortedSetRemoveRangeByScoreAsync(CacheServer server, SortedSetRemoveRangeByScoreCommand command)
         {
-            var db = GetDB(request.Server);
-            var removeCount = await db.SortedSetRemoveRangeByScoreAsync(request.Key, request.Start, request.Stop, exclude: GetExclude(request.Exclude), flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var removeCount = await db.SortedSetRemoveRangeByScoreAsync(command.Key, command.Start, command.Stop, exclude: GetExclude(command.Exclude), flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetRemoveRangeByScoreResponse()
             {
                 RemoveCount = removeCount,
@@ -1376,12 +1444,13 @@ namespace EZNEW.Cache.Redis
         /// element with the highest score, -2 the element with the second highest score
         /// and so forth.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set remove range by rank response</returns>
-        public async Task<SortedSetRemoveRangeByRankResponse> SortedSetRemoveRangeByRankAsync(SortedSetRemoveRangeByRankRequest request)
+        public async Task<SortedSetRemoveRangeByRankResponse> SortedSetRemoveRangeByRankAsync(CacheServer server, SortedSetRemoveRangeByRankCommand command)
         {
-            var db = GetDB(request.Server);
-            var removeCount = await db.SortedSetRemoveRangeByRankAsync(request.Key, request.Start, request.Stop, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var removeCount = await db.SortedSetRemoveRangeByRankAsync(command.Key, command.Start, command.Stop, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetRemoveRangeByRankResponse()
             {
                 RemoveCount = removeCount,
@@ -1397,12 +1466,13 @@ namespace EZNEW.Cache.Redis
         /// Removes the specified members from the sorted set stored at key. Non existing
         /// members are ignored.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set remove response</returns>
-        public async Task<SortedSetRemoveResponse> SortedSetRemoveAsync(SortedSetRemoveRequest request)
+        public async Task<SortedSetRemoveResponse> SortedSetRemoveAsync(CacheServer server, SortedSetRemoveCommand command)
         {
-            var db = GetDB(request.Server);
-            var removeCount = await db.SortedSetRemoveAsync(request.Key, request.RemoveMembers.Select(c => { RedisValue value = c; return value; }).ToArray(), flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var removeCount = await db.SortedSetRemoveAsync(command.Key, command.RemoveMembers.Select(c => { RedisValue value = c; return value; }).ToArray(), flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetRemoveResponse()
             {
                 Success = true,
@@ -1419,12 +1489,13 @@ namespace EZNEW.Cache.Redis
         /// scores ordered from low to high. The rank (or index) is 0-based, which means
         /// that the member with the lowest score has rank 0.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set rank response</returns>
-        public async Task<SortedSetRankResponse> SortedSetRankAsync(SortedSetRankRequest request)
+        public async Task<SortedSetRankResponse> SortedSetRankAsync(CacheServer server, SortedSetRankCommand command)
         {
-            var db = GetDB(request.Server);
-            var rank = await db.SortedSetRankAsync(request.Key, request.Member, GetSortedOrder(request.Order), flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var rank = await db.SortedSetRankAsync(command.Key, command.Member, GetSortedOrder(command.Order), flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetRankResponse()
             {
                 Success = true,
@@ -1441,22 +1512,23 @@ namespace EZNEW.Cache.Redis
         /// to force lexicographical ordering, this command returns all the elements in the
         /// sorted set at key with a value between min and max.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set range by value response</returns>
-        public async Task<SortedSetRangeByValueResponse> SortedSetRangeByValueAsync(SortedSetRangeByValueRequest request)
+        public async Task<SortedSetRangeByValueResponse> SortedSetRangeByValueAsync(CacheServer server, SortedSetRangeByValueCommand command)
         {
-            var db = GetDB(request.Server);
+            var db = GetDB(server);
             RedisValue minValue = default(RedisValue);
-            if (!request.MinValue.IsNullOrEmpty())
+            if (!command.MinValue.IsNullOrEmpty())
             {
-                minValue = request.MinValue;
+                minValue = command.MinValue;
             }
             RedisValue maxValue = default(RedisValue);
-            if (!request.MaxValue.IsNullOrEmpty())
+            if (!command.MaxValue.IsNullOrEmpty())
             {
-                maxValue = request.MaxValue;
+                maxValue = command.MaxValue;
             }
-            var values = await db.SortedSetRangeByValueAsync(request.Key, min: minValue, max: maxValue, exclude: GetExclude(request.Exclude), skip: request.Skip, take: request.Take, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var values = await db.SortedSetRangeByValueAsync(command.Key, min: minValue, max: maxValue, exclude: GetExclude(command.Exclude), skip: command.Skip, take: command.Take, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetRangeByValueResponse()
             {
                 Success = true,
@@ -1475,12 +1547,13 @@ namespace EZNEW.Cache.Redis
         /// used to specify the min and max range for score values. Similar to other range
         /// methods the values are inclusive.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set range by score with scores response</returns>
-        public async Task<SortedSetRangeByScoreWithScoresResponse> SortedSetRangeByScoreWithScoresAsync(SortedSetRangeByScoreWithScoresRequest request)
+        public async Task<SortedSetRangeByScoreWithScoresResponse> SortedSetRangeByScoreWithScoresAsync(CacheServer server, SortedSetRangeByScoreWithScoresCommand command)
         {
-            var db = GetDB(request.Server);
-            var members = await db.SortedSetRangeByScoreWithScoresAsync(request.Key, request.Start, request.Stop, exclude: GetExclude(request.Exclude), order: GetSortedOrder(request.Order), skip: request.Skip, take: request.Take, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var members = await db.SortedSetRangeByScoreWithScoresAsync(command.Key, command.Start, command.Stop, exclude: GetExclude(command.Exclude), order: GetSortedOrder(command.Order), skip: command.Skip, take: command.Take, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetRangeByScoreWithScoresResponse()
             {
                 Success = true,
@@ -1499,12 +1572,13 @@ namespace EZNEW.Cache.Redis
         /// used to specify the min and max range for score values. Similar to other range
         /// methods the values are inclusive.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set range by score response</returns>
-        public async Task<SortedSetRangeByScoreResponse> SortedSetRangeByScoreAsync(SortedSetRangeByScoreRequest request)
+        public async Task<SortedSetRangeByScoreResponse> SortedSetRangeByScoreAsync(CacheServer server, SortedSetRangeByScoreCommand command)
         {
-            var db = GetDB(request.Server);
-            var members = await db.SortedSetRangeByScoreAsync(request.Key, request.Start, request.Stop, exclude: GetExclude(request.Exclude), order: GetSortedOrder(request.Order), skip: request.Skip, take: request.Take, flags: GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var members = await db.SortedSetRangeByScoreAsync(command.Key, command.Start, command.Stop, exclude: GetExclude(command.Exclude), order: GetSortedOrder(command.Order), skip: command.Skip, take: command.Take, flags: GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetRangeByScoreResponse()
             {
                 Success = true,
@@ -1525,12 +1599,13 @@ namespace EZNEW.Cache.Redis
         /// sorted set, with -1 being the last element of the sorted set, -2 the penultimate
         /// element and so on.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set range by rank with scores response</returns>
-        public async Task<SortedSetRangeByRankWithScoresResponse> SortedSetRangeByRankWithScoresAsync(SortedSetRangeByRankWithScoresRequest request)
+        public async Task<SortedSetRangeByRankWithScoresResponse> SortedSetRangeByRankWithScoresAsync(CacheServer server, SortedSetRangeByRankWithScoresCommand command)
         {
-            var db = GetDB(request.Server);
-            var members = await db.SortedSetRangeByRankWithScoresAsync(request.Key, request.Start, request.Stop, GetSortedOrder(request.Order), GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var members = await db.SortedSetRangeByRankWithScoresAsync(command.Key, command.Start, command.Stop, GetSortedOrder(command.Order), GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetRangeByRankWithScoresResponse()
             {
                 Success = true,
@@ -1551,12 +1626,13 @@ namespace EZNEW.Cache.Redis
         /// sorted set, with -1 being the last element of the sorted set, -2 the penultimate
         /// element and so on.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set range by rank response</returns>
-        public async Task<SortedSetRangeByRankResponse> SortedSetRangeByRankAsync(SortedSetRangeByRankRequest request)
+        public async Task<SortedSetRangeByRankResponse> SortedSetRangeByRankAsync(CacheServer server, SortedSetRangeByRankCommand command)
         {
-            var db = GetDB(request.Server);
-            var members = await db.SortedSetRangeByRankAsync(request.Key, request.Start, request.Stop, GetSortedOrder(request.Order), GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var members = await db.SortedSetRangeByRankAsync(command.Key, command.Start, command.Stop, GetSortedOrder(command.Order), GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetRangeByRankResponse()
             {
                 Success = true,
@@ -1573,12 +1649,13 @@ namespace EZNEW.Cache.Redis
         /// to force lexicographical ordering, this command returns the number of elements
         /// in the sorted set at key with a value between min and max.
         /// </summary>
-        /// <param name="request">response</param>
+        /// <param name="server">server</param>
+        /// <param name="command">response</param>
         /// <returns>sorted set lenght by value response</returns>
-        public async Task<SortedSetLengthByValueResponse> SortedSetLengthByValueAsync(SortedSetLengthByValueRequest request)
+        public async Task<SortedSetLengthByValueResponse> SortedSetLengthByValueAsync(CacheServer server, SortedSetLengthByValueCommand command)
         {
-            var db = GetDB(request.Server);
-            var length = await db.SortedSetLengthByValueAsync(request.Key, request.MinValue, request.MaxValue, GetExclude(request.Exclude), GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var length = await db.SortedSetLengthByValueAsync(command.Key, command.MinValue, command.MaxValue, GetExclude(command.Exclude), GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetLengthByValueResponse()
             {
                 Success = true,
@@ -1594,12 +1671,13 @@ namespace EZNEW.Cache.Redis
         /// Returns the sorted set cardinality (number of elements) of the sorted set stored
         /// at key.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set length response</returns>
-        public async Task<SortedSetLengthResponse> SortedSetLengthAsync(SortedSetLengthRequest request)
+        public async Task<SortedSetLengthResponse> SortedSetLengthAsync(CacheServer server, SortedSetLengthCommand command)
         {
-            var db = GetDB(request.Server);
-            var length = await db.SortedSetLengthAsync(request.Key, request.Min, request.Max, GetExclude(request.Exclude), GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var length = await db.SortedSetLengthAsync(command.Key, command.Min, command.Max, GetExclude(command.Exclude), GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetLengthResponse()
             {
                 Success = true,
@@ -1616,12 +1694,13 @@ namespace EZNEW.Cache.Redis
         /// If member does not exist in the sorted set, it is added with increment as its
         /// score (as if its previous score was 0.0).
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set increment response</returns>
-        public async Task<SortedSetIncrementResponse> SortedSetIncrementAsync(SortedSetIncrementRequest request)
+        public async Task<SortedSetIncrementResponse> SortedSetIncrementAsync(CacheServer server, SortedSetIncrementCommand command)
         {
-            var db = GetDB(request.Server);
-            var newScore = await db.SortedSetIncrementAsync(request.Key, request.Member, request.IncrementScore, GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var newScore = await db.SortedSetIncrementAsync(command.Key, command.Member, command.IncrementScore, GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetIncrementResponse()
             {
                 Success = true,
@@ -1638,12 +1717,13 @@ namespace EZNEW.Cache.Redis
         /// If member does not exist in the sorted set, it is added with -decrement as its
         /// score (as if its previous score was 0.0).
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set decrement response</returns>
-        public async Task<SortedSetDecrementResponse> SortedSetDecrementAsync(SortedSetDecrementRequest request)
+        public async Task<SortedSetDecrementResponse> SortedSetDecrementAsync(CacheServer server, SortedSetDecrementCommand command)
         {
-            var db = GetDB(request.Server);
-            var newScore = await db.SortedSetDecrementAsync(request.Key, request.Member, request.DecrementScore, GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var newScore = await db.SortedSetDecrementAsync(command.Key, command.Member, command.DecrementScore, GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetDecrementResponse()
             {
                 Success = true,
@@ -1660,12 +1740,13 @@ namespace EZNEW.Cache.Redis
         /// weights), and stores the result in destination, optionally performing a specific
         /// aggregation (defaults to sum)
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set combine and store response</returns>
-        public async Task<SortedSetCombineAndStoreResponse> SortedSetCombineAndStoreAsync(SortedSetCombineAndStoreRequest request)
+        public async Task<SortedSetCombineAndStoreResponse> SortedSetCombineAndStoreAsync(CacheServer server, SortedSetCombineAndStoreCommand command)
         {
-            var db = GetDB(request.Server);
-            var newSetLength = await db.SortedSetCombineAndStoreAsync(GetSetOperation(request.SetOperation), request.DestinationKey, request.SourceKeys.Select(c => { RedisKey key = c; return key; }).ToArray(), request.Weights, GetAggregate(request.Aggregate), GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var newSetLength = await db.SortedSetCombineAndStoreAsync(GetSetOperation(command.SetOperation), command.DestinationKey, command.SourceKeys.Select(c => { RedisKey key = c; return key; }).ToArray(), command.Weights, GetAggregate(command.Aggregate), GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetCombineAndStoreResponse()
             {
                 Success = true,
@@ -1683,12 +1764,13 @@ namespace EZNEW.Cache.Redis
         /// is updated and the element reinserted at the right position to ensure the correct
         /// ordering.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sorted set add response</returns>
-        public async Task<SortedSetAddResponse> SortedSetAddAsync(SortedSetAddRequest request)
+        public async Task<SortedSetAddResponse> SortedSetAddAsync(CacheServer server, SortedSetAddCommand command)
         {
-            var db = GetDB(request.Server);
-            var newLength = await db.SortedSetAddAsync(request.Key, request.Members.Select(c => new SortedSetEntry(c.Value, c.Score)).ToArray(), GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var newLength = await db.SortedSetAddAsync(command.Key, command.Members.Select(c => new SortedSetEntry(c.Value, c.Score)).ToArray(), GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortedSetAddResponse()
             {
                 Success = true,
@@ -1714,22 +1796,23 @@ namespace EZNEW.Cache.Redis
         /// for examples is recommended. When used in hashes, by and get can be used to specify
         /// fields using -> notation (again, refer to redis documentation).
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sort response</returns>
-        public async Task<SortResponse> SortAsync(SortRequest request)
+        public async Task<SortResponse> SortAsync(CacheServer server, SortCommand command)
         {
-            var db = GetDB(request.Server);
+            var db = GetDB(server);
             RedisValue byValue = default(RedisValue);
-            if (!request.By.IsNullOrEmpty())
+            if (!command.By.IsNullOrEmpty())
             {
-                byValue = request.By;
+                byValue = command.By;
             }
             RedisValue[] getValues = null;
-            if (!request.Gets.IsNullOrEmpty())
+            if (!command.Gets.IsNullOrEmpty())
             {
-                getValues = request.Gets.Select(c => { RedisValue value = c; return value; }).ToArray();
+                getValues = command.Gets.Select(c => { RedisValue value = c; return value; }).ToArray();
             }
-            var values = await db.SortAsync(request.Key, request.Skip, request.Take, GetSortedOrder(request.Order), GetSortType(request.SortType), byValue, getValues, GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var values = await db.SortAsync(command.Key, command.Skip, command.Take, GetSortedOrder(command.Order), GetSortType(command.SortType), byValue, getValues, GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortResponse()
             {
                 Success = true,
@@ -1751,22 +1834,23 @@ namespace EZNEW.Cache.Redis
         /// for examples is recommended. When used in hashes, by and get can be used to specify
         /// fields using -> notation (again, refer to redis documentation).
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>sort and store response</returns>
-        public async Task<SortAndStoreResponse> SortAndStoreAsync(SortAndStoreRequest request)
+        public async Task<SortAndStoreResponse> SortAndStoreAsync(CacheServer server, SortAndStoreCommand command)
         {
-            var db = GetDB(request.Server);
+            var db = GetDB(server);
             RedisValue byValue = default(RedisValue);
-            if (!request.By.IsNullOrEmpty())
+            if (!command.By.IsNullOrEmpty())
             {
-                byValue = request.By;
+                byValue = command.By;
             }
             RedisValue[] getValues = null;
-            if (!request.Gets.IsNullOrEmpty())
+            if (!command.Gets.IsNullOrEmpty())
             {
-                getValues = request.Gets.Select(c => { RedisValue value = c; return value; }).ToArray();
+                getValues = command.Gets.Select(c => { RedisValue value = c; return value; }).ToArray();
             }
-            var length = await db.SortAndStoreAsync(request.DestinationKey, request.SourceKey, request.Skip, request.Take, GetSortedOrder(request.Order), GetSortType(request.SortType), byValue, getValues, GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var length = await db.SortAndStoreAsync(command.DestinationKey, command.SourceKey, command.Skip, command.Take, GetSortedOrder(command.Order), GetSortType(command.SortType), byValue, getValues, GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new SortAndStoreResponse()
             {
                 Success = true,
@@ -1786,12 +1870,13 @@ namespace EZNEW.Cache.Redis
         /// Returns the string representation of the type of the value stored at key. The
         /// different types that can be returned are: string, list, set, zset and hash.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>key type response</returns>
-        public async Task<KeyTypeResponse> KeyTypeAsync(KeyTypeRequest request)
+        public async Task<KeyTypeResponse> KeyTypeAsync(CacheServer server, KeyTypeCommand command)
         {
-            var db = GetDB(request.Server);
-            var keyType = await db.KeyTypeAsync(request.Key, GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var keyType = await db.KeyTypeAsync(command.Key, GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new KeyTypeResponse()
             {
                 Success = true,
@@ -1808,12 +1893,13 @@ namespace EZNEW.Cache.Redis
         /// capability allows a Redis client to check how many seconds a given key will continue
         /// to be part of the dataset.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>key time to live response</returns>
-        public async Task<KeyTimeToLiveResponse> KeyTimeToLiveAsync(KeyTimeToLiveRequest request)
+        public async Task<KeyTimeToLiveResponse> KeyTimeToLiveAsync(CacheServer server, KeyTimeToLiveCommand command)
         {
-            var db = GetDB(request.Server);
-            var timeSpan = await db.KeyTimeToLiveAsync(request.Key, GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var timeSpan = await db.KeyTimeToLiveAsync(command.Key, GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new KeyTimeToLiveResponse()
             {
                 Success = true,
@@ -1830,12 +1916,13 @@ namespace EZNEW.Cache.Redis
         /// serialized value (obtained via DUMP). If ttl is 0 the key is created without
         /// any expire, otherwise the specified expire time(in milliseconds) is set.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>key restore response</returns>
-        public async Task<KeyRestoreResponse> KeyRestoreAsync(KeyRestoreRequest request)
+        public async Task<KeyRestoreResponse> KeyRestoreAsync(CacheServer server, KeyRestoreCommand command)
         {
-            var db = GetDB(request.Server);
-            await db.KeyRestoreAsync(request.Key, request.Value, request.Expiry, GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            await db.KeyRestoreAsync(command.Key, command.Value, command.Expiry, GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new KeyRestoreResponse()
             {
                 Success = true
@@ -1850,12 +1937,13 @@ namespace EZNEW.Cache.Redis
         /// Renames key to newkey. It returns an error when the source and destination names
         /// are the same, or when key does not exist.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>key rename response</returns>
-        public async Task<KeyRenameResponse> KeyRenameAsync(KeyRenameRequest request)
+        public async Task<KeyRenameResponse> KeyRenameAsync(CacheServer server, KeyRenameCommand command)
         {
-            var db = GetDB(request.Server);
-            var result = await db.KeyRenameAsync(request.Key, request.NewKey, GetWhen(request.When), GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var result = await db.KeyRenameAsync(command.Key, command.NewKey, GetWhen(command.When), GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new KeyRenameResponse()
             {
                 Success = true,
@@ -1870,12 +1958,13 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Return a random key from the currently selected database.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>key random response</returns>
-        public async Task<KeyRandomResponse> KeyRandomAsync(KeyRandomRequest request)
+        public async Task<KeyRandomResponse> KeyRandomAsync(CacheServer server, KeyRandomCommand command)
         {
-            var db = GetDB(request.Server);
-            var key = await db.KeyRandomAsync(GetCommandFlags(request.CommandFlags));
+            var db = GetDB(server);
+            var key = await db.KeyRandomAsync(GetCommandFlags(command.CommandFlags));
             return new KeyRandomResponse()
             {
                 Success = true,
@@ -1891,12 +1980,13 @@ namespace EZNEW.Cache.Redis
         /// Remove the existing timeout on key, turning the key from volatile (a key with
         /// an expire set) to persistent (a key that will never expire as no timeout is associated).
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>key persist response</returns>
-        public async Task<KeyPersistResponse> KeyPersistAsync(KeyPersistRequest request)
+        public async Task<KeyPersistResponse> KeyPersistAsync(CacheServer server, KeyPersistCommand command)
         {
-            var db = GetDB(request.Server);
-            var result = await db.KeyPersistAsync(request.Key, GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var result = await db.KeyPersistAsync(command.Key, GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new KeyPersistResponse()
             {
                 Success = true,
@@ -1914,12 +2004,13 @@ namespace EZNEW.Cache.Redis
         /// exist in the source database, it does nothing. It is possible to use MOVE as
         /// a locking primitive because of this.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>key move response</returns>
-        public async Task<KeyMoveResponse> KeyMoveAsync(KeyMoveRequest request)
+        public async Task<KeyMoveResponse> KeyMoveAsync(CacheServer server, KeyMoveCommand command)
         {
-            var db = GetDB(request.Server);
-            var result = await db.KeyMoveAsync(request.Key, request.DataBase, GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var result = await db.KeyMoveAsync(command.Key, command.DataBase, GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new KeyMoveResponse()
             {
                 Success = true,
@@ -1936,12 +2027,13 @@ namespace EZNEW.Cache.Redis
         /// instance. On success the key is deleted from the original instance by default,
         /// and is guaranteed to exist in the target instance.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>key migrate response</returns>
-        public async Task<KeyMigrateResponse> KeyMigrateAsync(KeyMigrateRequest request)
+        public async Task<KeyMigrateResponse> KeyMigrateAsync(CacheServer server, KeyMigrateCommand command)
         {
-            var db = GetDB(request.Server);
-            await db.KeyMigrateAsync(request.Key, new IPEndPoint(new IPAddress(Encoding.UTF8.GetBytes(request.Server?.Host)), request.Server?.Port ?? 0), int.Parse(request.Server?.Db ?? "0"), request.TimeOutMilliseconds, GetMigrateOptions(request.MigrateOptions), GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            await db.KeyMigrateAsync(command.Key, new IPEndPoint(new IPAddress(Encoding.UTF8.GetBytes(server?.Host)), server?.Port ?? 0), int.Parse(server?.Db ?? "0"), command.TimeOutMilliseconds, GetMigrateOptions(command.MigrateOptions), GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new KeyMigrateResponse()
             {
                 Success = true
@@ -1957,12 +2049,13 @@ namespace EZNEW.Cache.Redis
         /// be deleted. A key with an associated timeout is said to be volatile in Redis
         /// terminology.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>key expire response</returns>
-        public async Task<KeyExpireResponse> KeyExpireAsync(KeyExpireRequest request)
+        public async Task<KeyExpireResponse> KeyExpireAsync(CacheServer server, KeyExpireCommand command)
         {
-            var db = GetDB(request.Server);
-            var result = await db.KeyExpireAsync(request.Key, request.Expire, GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var result = await db.KeyExpireAsync(command.Key, command.Expire, GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new KeyExpireResponse()
             {
                 Success = true,
@@ -1979,12 +2072,13 @@ namespace EZNEW.Cache.Redis
         /// the user. The returned value can be synthesized back into a Redis key using the
         /// RESTORE command.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>key dump response</returns>
-        public async Task<KeyDumpResponse> KeyDumpAsync(KeyDumpRequest request)
+        public async Task<KeyDumpResponse> KeyDumpAsync(CacheServer server, KeyDumpCommand command)
         {
-            var db = GetDB(request.Server);
-            var byteValues = await db.KeyDumpAsync(request.Key, GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var byteValues = await db.KeyDumpAsync(command.Key, GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new KeyDumpResponse()
             {
                 Success = true,
@@ -1999,16 +2093,38 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// Removes the specified keys. A key is ignored if it does not exist.
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>key delete response</returns>
-        public async Task<KeyDeleteResponse> KeyDeleteAsync(KeyDeleteRequest request)
+        public async Task<KeyDeleteResponse> KeyDeleteAsync(CacheServer server, KeyDeleteCommand command)
         {
-            var db = GetDB(request.Server);
-            var count = await db.KeyDeleteAsync(request.Keys.Select(c => { RedisKey key = c; return key; }).ToArray(), GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+            var db = GetDB(server);
+            var count = await db.KeyDeleteAsync(command.Keys.Select(c => { RedisKey key = c; return key; }).ToArray(), GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             return new KeyDeleteResponse()
             {
                 Success = true,
                 DeleteCount = count
+            };
+        }
+
+        #endregion
+
+        #region KeyExists
+
+        /// <summary>
+        /// key exists
+        /// </summary>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
+        /// <returns></returns>
+        public async Task<KeyExistsResponse> KeyExistsAsync(CacheServer server, KeyExistsCommand command)
+        {
+            var db = GetDB(server);
+            var keyCount = await db.KeyExistsAsync(command.keys.Select(c => { RedisKey key = c; return key; }).ToArray(), GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
+            return new KeyExistsResponse()
+            {
+                Success = true,
+                KeyCount = keyCount
             };
         }
 
@@ -2023,18 +2139,19 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// get all database
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>get all database response</returns>
-        public async Task<GetAllDataBaseResponse> GetAllDataBaseAsync(GetAllDataBaseRequest request)
+        public async Task<GetAllDataBaseResponse> GetAllDataBaseAsync(CacheServer server, GetAllDataBaseCommand command)
         {
             var dataBaseList = await Task<List<CacheDb>>.Run(() =>
             {
-                if (request.Server == null)
+                if (server == null)
                 {
                     return new List<CacheDb>(0);
                 }
-                var conn = GetConnection(request.Server);
-                var configs = conn.GetServer(string.Format("{0}:{1}", request.Server, request.Server)).ConfigGet("databases");
+                var conn = GetConnection(server);
+                var configs = conn.GetServer(string.Format("{0}:{1}", server, server)).ConfigGet("databases");
                 if (configs == null || configs.Length <= 0)
                 {
                     return new List<CacheDb>(0);
@@ -2066,38 +2183,49 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// query keys
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>get keys response</returns>
-        public async Task<GetKeysResponse> GetKeysAsync(GetKeysRequest request)
+        public async Task<GetKeysResponse> GetKeysAsync(CacheServer server, GetKeysCommand command)
         {
-            var keyItemPaging = await Task<CachePaging<KeyItem>>.Run(async () =>
-             {
-                 var server = request.Server;
-                 var query = request.Query;
-                 if (server == null)
-                 {
-                     return CachePaging<KeyItem>.EmptyPaging();
-                 }
-                 var db = GetDB(server);
-                 string searchString = "*";
-                 if (query != null && !string.IsNullOrWhiteSpace(query.MateKey))
-                 {
-                     searchString = string.Format("*{0}*", query.MateKey);
-                 }
-                 var redisServer = db.Multiplexer.GetServer(string.Format("{0}:{1}", server.Host, server.Port));//(query.Page - 1) * query.PageSize
-                 var keys = redisServer.Keys(db.Database, searchString, query.PageSize, 0, (query.Page - 1) * query.PageSize, CommandFlags.None);
-                 List<KeyItem> itemList = new List<KeyItem>();
-                 foreach (var key in keys)
-                 {
-                     KeyItem item = new KeyItem();
-                     item.Key = key;
-                     var redisType = await db.KeyTypeAsync(key, CommandFlags.None).ConfigureAwait(false);
-                     item.Type = GetCacheKeyType(redisType);
-                     itemList.Add(item);
-                 }
-                 var totalCount = redisServer.DatabaseSize(db.Database);
-                 return new CachePaging<KeyItem>(query.Page, query.PageSize, totalCount, itemList);
-             }).ConfigureAwait(false);
+            var keyItemPaging = await Task<CachePaging<CacheDataItem>>.Run(async () =>
+            {
+                var query = command.Query;
+                if (server == null)
+                {
+                    return CachePaging<CacheDataItem>.EmptyPaging();
+                }
+                var db = GetDB(server);
+                string searchString = "*";
+                if (query != null && !string.IsNullOrWhiteSpace(query.MateKey))
+                {
+                    switch(query.Type)
+                    {
+                        case KeyPatternType.StartWith:
+                            searchString = query.MateKey + "*";
+                            break;
+                        case KeyPatternType.EndWith:
+                            searchString = "*"+query.MateKey;
+                            break;
+                        default:
+                            searchString = string.Format("*{0}*", query.MateKey);
+                            break;
+                    }
+                }
+                var redisServer = db.Multiplexer.GetServer(string.Format("{0}:{1}", server.Host, server.Port));//(query.Page - 1) * query.PageSize
+                var keys = redisServer.Keys(db.Database, searchString, query.PageSize, 0, (query.Page - 1) * query.PageSize, CommandFlags.None);
+                List<CacheDataItem> itemList = new List<CacheDataItem>();
+                foreach (var key in keys)
+                {
+                    CacheDataItem item = new CacheDataItem();
+                    item.Name = key;
+                    var redisType = await db.KeyTypeAsync(key, CommandFlags.None).ConfigureAwait(false);
+                    item.Type = GetCacheKeyType(redisType);
+                    itemList.Add(item);
+                }
+                var totalCount = redisServer.DatabaseSize(db.Database);
+                return new CachePaging<CacheDataItem>(query.Page, query.PageSize, totalCount, itemList);
+            }).ConfigureAwait(false);
             return new GetKeysResponse()
             {
                 Success = true,
@@ -2112,12 +2240,12 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// clear database data
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>clear data response</returns>
-        public async Task<ClearDataResponse> ClearDataAsync(ClearDataRequest request)
+        public async Task<ClearDataResponse> ClearDataAsync(CacheServer server, ClearDataCommand command)
         {
-            var server = request.Server;
-            if (request.DataBaseList.IsNullOrEmpty())
+            if (command.DataBaseList.IsNullOrEmpty())
             {
                 return new ClearDataResponse()
                 {
@@ -2127,9 +2255,9 @@ namespace EZNEW.Cache.Redis
             }
             var conn = GetConnection(server);
             var redisServer = conn.GetServer(string.Format("{0}:{1}", server.Host, server.Port));
-            foreach (var db in request.DataBaseList)
+            foreach (var db in command.DataBaseList)
             {
-                await redisServer.FlushDatabaseAsync(db?.Index ?? 0, GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
+                await redisServer.FlushDatabaseAsync(db?.Index ?? 0, GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
             }
             return new ClearDataResponse()
             {
@@ -2144,44 +2272,44 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// get cache item detail
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>get key detail response</returns>
-        public async Task<GetKeyDetailResponse> GetKeyDetailAsync(GetKeyDetailRequest request)
+        public async Task<GetKeyDetailResponse> GetKeyDetailAsync(CacheServer server, GetKeyDetailCommand command)
         {
-            var server = request.Server;
             var db = GetDB(server);
-            var redisType = await db.KeyTypeAsync(request.Key, GetCommandFlags(request.CommandFlags)).ConfigureAwait(false);
-            KeyItem keyItem = new KeyItem()
+            var redisType = await db.KeyTypeAsync(command.Key, GetCommandFlags(command.CommandFlags)).ConfigureAwait(false);
+            CacheDataItem keyItem = new CacheDataItem()
             {
-                Key = request.Key,
+                Name = command.Key,
                 Type = GetCacheKeyType(redisType)
             };
             switch (redisType)
             {
                 case RedisType.String:
-                    keyItem.Value = await db.StringGetAsync(keyItem.Key).ConfigureAwait(false);
+                    keyItem.Value = await db.StringGetAsync(keyItem.Name).ConfigureAwait(false);
                     break;
                 case RedisType.List:
                     List<string> listValues = new List<string>();
-                    var listResults = await db.ListRangeAsync(keyItem.Key, 0, -1, CommandFlags.None).ConfigureAwait(false);
+                    var listResults = await db.ListRangeAsync(keyItem.Name, 0, -1, CommandFlags.None).ConfigureAwait(false);
                     listValues.AddRange(listResults.Select(c => (string)c));
                     keyItem.Value = listValues;
                     break;
                 case RedisType.Set:
                     List<string> setValues = new List<string>();
-                    var setResults = await db.SetMembersAsync(keyItem.Key, CommandFlags.None).ConfigureAwait(false);
+                    var setResults = await db.SetMembersAsync(keyItem.Name, CommandFlags.None).ConfigureAwait(false);
                     setValues.AddRange(setResults.Select(c => (string)c));
                     keyItem.Value = setValues;
                     break;
                 case RedisType.SortedSet:
                     List<string> sortSetValues = new List<string>();
-                    var sortedResults = await db.SortedSetRangeByRankAsync(keyItem.Key).ConfigureAwait(false);
+                    var sortedResults = await db.SortedSetRangeByRankAsync(keyItem.Name).ConfigureAwait(false);
                     sortSetValues.AddRange(sortedResults.Select(c => (string)c));
                     keyItem.Value = sortSetValues;
                     break;
                 case RedisType.Hash:
                     Dictionary<string, string> hashValues = new Dictionary<string, string>();
-                    var objValues = await db.HashGetAllAsync(keyItem.Key).ConfigureAwait(false);
+                    var objValues = await db.HashGetAllAsync(keyItem.Name).ConfigureAwait(false);
                     foreach (var obj in objValues)
                     {
                         hashValues.Add(obj.Name, obj.Value);
@@ -2203,11 +2331,11 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// get server config
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>get server config response</returns>
-        public async Task<GetServerConfigResponse> GetServerConfigAsync(GetServerConfigRequest request)
+        public async Task<GetServerConfigResponse> GetServerConfigAsync(CacheServer server, GetServerConfigCommand command)
         {
-            var server = request.Server;
             if (server == null)
             {
                 return null;
@@ -2418,12 +2546,12 @@ namespace EZNEW.Cache.Redis
         /// <summary>
         /// save server config
         /// </summary>
-        /// <param name="request">request</param>
+        /// <param name="server">server</param>
+        /// <param name="command">command</param>
         /// <returns>save server config response</returns>
-        public async Task<SaveServerConfigResponse> SaveServerConfigAsync(SaveServerConfigRequest request)
+        public async Task<SaveServerConfigResponse> SaveServerConfigAsync(CacheServer server, SaveServerConfigCommand command)
         {
-            var config = request.ServerConfig;
-            var server = request.Server;
+            var config = command.ServerConfig;
             if (config == null)
             {
                 return new SaveServerConfigResponse()
@@ -2769,6 +2897,8 @@ namespace EZNEW.Cache.Redis
             {
                 configOption.TieBreaker = server.TieBreaker;
             }
+            ThreadPool.SetMinThreads(32767, 250);
+            configOption.SyncTimeout = 10000;
             multiplexer = ConnectionMultiplexer.Connect(configOption);
             connectionDict.TryAdd(serverKey, multiplexer);
             return multiplexer;
